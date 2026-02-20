@@ -30,6 +30,8 @@ class STTNInpaint:
         self.model.load_state_dict(torch.load(config.STTN_MODEL_PATH, map_location='cpu')['netG'])
         # 3. # 将模型设置为评估模式
         self.model.eval()
+        # 4. 将模型权重转为 fp16，使 Conv2d/matmul 在 MPS 上以半精度运行
+        self.model = self.model.half()
         # 模型输入用的宽和高
         self.model_input_width, self.model_input_height = 640, 120
         # 2. 设置相连帧数
@@ -120,8 +122,8 @@ class STTNInpaint:
         frame_length = len(frames)
         # 对帧进行预处理转换为张量，并进行归一化
         feats = _to_tensors(frames).unsqueeze(0) * 2 - 1
-        # 把特征张量转移到指定的设备（CPU或GPU）
-        feats = feats.to(self.device)
+        # 把特征张量转移到指定的设备（CPU或GPU），并转为 fp16 与模型权重匹配
+        feats = feats.to(self.device).half()
         # 初始化一个与视频长度相同的列表，用于存储处理完成的帧
         comp_frames = [None] * frame_length
         # 关闭梯度计算，用于推理阶段节省内存并加速
@@ -145,8 +147,8 @@ class STTNInpaint:
                 pred_feat = self.model.infer(feats[0, neighbor_ids + ref_ids, :, :, :])
                 # 将预测的特征通过解码器生成图片，并应用激活函数tanh，然后分离出张量
                 pred_img = torch.tanh(self.model.decoder(pred_feat[:len(neighbor_ids), :, :, :])).detach()
-                # 将结果张量重新缩放到0到255的范围内（图像像素值）
-                pred_img = (pred_img + 1) / 2
+                # fp16→fp32 后再转 CPU，避免 numpy 精度问题
+                pred_img = (pred_img.float() + 1) / 2
                 # 将张量移动回CPU并转为NumPy数组
                 pred_img = pred_img.cpu().permute(0, 2, 3, 1).numpy() * 255
                 # 遍历邻近帧
